@@ -3,9 +3,10 @@ import pandas as pd
 import requests
 import xml.etree.ElementTree as ET
 
-st.set_page_config(page_title="NME Dashboard PO", layout="wide")
+# Pagina instellingen
+st.set_page_config(page_title="NME Monitor PO", layout="wide")
 
-# Exacte namespaces uit jouw bron
+# Exacte namespaces uit jouw bronvermelding
 NAMESPACES = {
     'ns1': 'https://www.nmegids.nl/algemeen/interface/xml',
     'xsi': 'https://www.w3.org/2001/XMLSchema-instance'
@@ -14,101 +15,98 @@ NAMESPACES = {
 URL_ROOSTERS = "https://nmegids.nl/algemeen/interface/xml/excelanalyse-roosters.php?aanbieder=we&token=143fe43ad3750bdewe&schooljaar=2025-2026"
 URL_SCHOLEN = "https://nmegids.nl/algemeen/interface/xml/excelanalyse-scholen.php?aanbieder=we&token=143fe43ad3750bdewe"
 
-@st.cache_data(ttl=600)
+@st.cache_data(ttl=300)
 def laad_data():
-    # 1. Scholen ophalen (Basislijst: alleen PO)
+    # --- 1. SCHOLEN OPHALEN (Basislijst: Alleen PO) ---
     try:
-        r_scholen = requests.get(URL_SCHOLEN)
-        root_s = ET.fromstring(r_scholen.content)
+        r_s = requests.get(URL_SCHOLEN)
+        root_s = ET.fromstring(r_s.content)
         
         scholen_data = []
-        for school_node in root_s.findall('.//ns1:school', NAMESPACES):
-            naam = school_node.find('ns1:schoolnaam', NAMESPACES)
-            stype = school_node.find('ns1:schooltype', NAMESPACES)
-            groepen = school_node.find('ns1:aantalingevoerdegroepen', NAMESPACES)
+        for s in root_s.findall('.//ns1:school', NAMESPACES):
+            naam = s.find('ns1:schoolnaam', NAMESPACES)
+            stype = s.find('ns1:schooltype', NAMESPACES)
+            groepen = s.find('ns1:aantalingevoerdegroepen', NAMESPACES)
             
-            # Filter: Alleen PO scholen
+            # Filter op PO
             if naam is not None and stype is not None and stype.text.lower() == 'po':
                 scholen_data.append({
-                    'Schoolnaam': naam.text,
+                    'Schoolnaam': naam.text.strip(),
                     'Ingevoerde groepen': int(groepen.text) if (groepen is not None and groepen.text) else 0
                 })
-        df_scholen = pd.DataFrame(scholen_data)
-    except:
-        df_scholen = pd.DataFrame(columns=['Schoolnaam', 'Ingevoerde groepen'])
+        df_base = pd.DataFrame(scholen_data)
+    except Exception as e:
+        st.error(f"Fout bij scholen-XML: {e}")
+        return pd.DataFrame()
 
-    # 2. Roosters ophalen (Specifiek uidreservering tellen)
+    # --- 2. ROOSTERS OPHALEN (Tellen van alle regels/reserveringen) ---
     try:
-        r_roosters = requests.get(URL_ROOSTERS)
-        root_r = ET.fromstring(r_roosters.content)
+        r_r = requests.get(URL_ROOSTERS)
+        root_r = ET.fromstring(r_r.content)
         
-        rooster_records = []
+        rooster_lijst = []
         for item in root_r.findall('.//ns1:item', NAMESPACES):
-            school_r = item.find('ns1:schoolnaam', NAMESPACES)
-            type_act = item.find('ns1:type', NAMESPACES)
-            uid_res = item.find('ns1:uidreservering', NAMESPACES)
+            s_naam = item.find('ns1:schoolnaam', NAMESPACES)
+            s_type_act = item.find('ns1:type', NAMESPACES)
             
-            # Alleen data verzamelen als alle velden bestaan en type klopt
-            if school_r is not None and type_act is not None and uid_res is not None:
-                if type_act.text in ['Gastles', 'Excursie']:
-                    rooster_records.append({
-                        'Schoolnaam': school_r.text,
-                        'uidreservering': uid_res.text
-                    })
+            if s_naam is not None and s_type_act is not None:
+                # Alleen Gastles en Excursie
+                if s_type_act.text in ['Gastles', 'Excursie']:
+                    rooster_lijst.append(s_naam.text.strip())
         
-        df_rooster_raw = pd.DataFrame(rooster_records)
-        
-        # Tel het aantal UNIEKE uidreserveringen per schoolnaam
-        if not df_rooster_raw.empty:
-            df_counts = df_rooster_raw.groupby('Schoolnaam')['uidreservering'].nunique().reset_index()
-            df_counts.columns = ['Schoolnaam', 'Aantal Reserveringen']
-        else:
-            df_counts = pd.DataFrame(columns=['Schoolnaam', 'Aantal Reserveringen'])
-    except:
-        df_counts = pd.DataFrame(columns=['Schoolnaam', 'Aantal Reserveringen'])
+        # Tel alle voorkomens per school (inclusief dubbele uids)
+        df_counts = pd.DataFrame(rooster_lijst, columns=['Schoolnaam']).value_counts().reset_index()
+        df_counts.columns = ['Schoolnaam', 'Reserveringen']
+            
+    except Exception as e:
+        st.error(f"Fout bij rooster-XML: {e}")
+        df_counts = pd.DataFrame(columns=['Schoolnaam', 'Reserveringen'])
 
-    # 3. Samenvoegen
-    if not df_scholen.empty:
-        final = pd.merge(df_scholen, df_counts, on='Schoolnaam', how='left').fillna(0)
-        final['Aantal Reserveringen'] = final['Aantal Reserveringen'].astype(int)
+    # --- 3. SAMENVOEGEN ---
+    if not df_base.empty:
+        # Koppel telling aan de PO-lijst
+        final = pd.merge(df_base, df_counts, on='Schoolnaam', how='left').fillna(0)
+        final['Reserveringen'] = final['Reserveringen'].astype(int)
+        # Bereken limiet: 2 x aantal groepen
         final['Limiet'] = final['Ingevoerde groepen'] * 2
         return final
+    
     return pd.DataFrame()
 
-# --- Dashboard Layout ---
-st.title("🏫 PO Scholen: Reserveringen vs Groepen")
-st.caption("Telling op basis van unieke uidreservering voor Gastlessen en Excursies.")
+# --- DASHBOARD ---
+st.title("📊 NME Dashboard: PO Scholen")
+st.info("Dit dashboard toont alle PO scholen en telt het totaal aantal reserveringsregels (Gastles & Excursie).")
 
-data = laad_data()
+df = laad_data()
 
-if not data.empty:
-    # Sidebar Filters
-    st.sidebar.header("Filter Instellingen")
-    f_limiet = st.sidebar.checkbox("Aantal Reserveringen > Limiet (2x groepen)")
+if not df.empty:
+    # Filters in de sidebar
+    st.sidebar.header("Filteren")
+    f_limiet = st.sidebar.checkbox("Reserveringen > Limiet")
     f_groepen = st.sidebar.checkbox("Ingevoerde groepen > 20")
 
-    # Filter acties
-    df_disp = data.copy()
+    # Filter logica
+    df_disp = df.copy()
     if f_limiet:
-        df_disp = df_disp[df_disp['Aantal Reserveringen'] > df_disp['Limiet']]
+        df_disp = df_disp[df_disp['Reserveringen'] > df_disp['Limiet']]
     if f_groepen:
         df_disp = df_disp[df_disp['Ingevoerde groepen'] > 20]
 
     # Metrics
     c1, c2, c3 = st.columns(3)
-    c1.metric("Aantal PO Scholen", len(df_disp))
-    c2.metric("Totaal unieke reserveringen", df_disp['Aantal Reserveringen'].sum())
-    c3.metric("Totaal groepen", df_disp['Ingevoerde groepen'].sum())
+    c1.metric("Aantal Scholen", len(df_disp))
+    c2.metric("Totaal Reserveringen", df_disp['Reserveringen'].sum())
+    c3.metric("Totaal Groepen", df_disp['Ingevoerde groepen'].sum())
 
-    # Tabelweergave
+    # Tabel tonen
     st.dataframe(
-        df_disp.sort_values(by=['Aantal Reserveringen', 'Ingevoerde groepen'], ascending=[False, False]),
+        df_disp.sort_values(by='Reserveringen', ascending=False),
         use_container_width=True,
         hide_index=True
     )
     
-    # Export
+    # Download knop
     csv = df_disp.to_csv(index=False).encode('utf-8')
-    st.download_button("Download Selectie (CSV)", csv, "nme_analyse_export.csv", "text/csv")
+    st.download_button("Download Selectie (CSV)", csv, "nme_analyse.csv", "text/csv")
 else:
-    st.error("Kon geen data verwerken. Controleer of de XML bronnen bereikbaar zijn.")
+    st.warning("Geen data gevonden. Controleer de verbinding.")
