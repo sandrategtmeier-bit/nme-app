@@ -1,3 +1,4 @@
+import io
 import streamlit as st
 import pandas as pd
 import requests  # Cruciaal: dit voorkomt de 'not defined' fout
@@ -18,28 +19,28 @@ URL_SCHOLEN = "https://nmegids.nl/algemeen/interface/xml/excelanalyse-scholen.ph
 st.title("🏫 NME Scholen & Limiet Controleur")
 
 # --- STAP 1: DATA OPHALEN UIT XML MET HEADERS ---
+import io # Voeg deze import bovenaan toe!
+
 @st.cache_data(ttl=300)
 def fetch_nme_data():
-    # We doen ons voor als een normale browser om de 403-blokkade te omzeilen
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
     }
     try:
-        # Haal de ruwe XML op via requests
         resp_s = requests.get(URL_SCHOLEN, headers=headers)
         resp_r = requests.get(URL_ROOSTERS, headers=headers)
         
-        # Controleer op fouten (zoals 403 of 404)
         resp_s.raise_for_status()
         resp_r.raise_for_status()
 
-        # Zet XML om naar DataFrames
-        df_s = pd.read_xml(resp_s.content, namespaces=NAMESPACES)
-        df_r = pd.read_xml(resp_r.content, namespaces=NAMESPACES)
+        # FIX: We gebruiken io.BytesIO om de bytes om te zetten naar een 'file-like object'
+        # Dit is wat pd.read_xml verwacht.
+        df_s = pd.read_xml(io.BytesIO(resp_s.content), namespaces=NAMESPACES)
+        df_r = pd.read_xml(io.BytesIO(resp_r.content), namespaces=NAMESPACES)
         
         return df_s, df_r
     except Exception as e:
-        st.error(f"Toegang geweigerd of fout bij laden: {e}")
+        st.error(f"Fout bij verwerken XML: {e}")
         return pd.DataFrame(), pd.DataFrame()
 
 with st.spinner("Data ophalen uit NME-gids..."):
