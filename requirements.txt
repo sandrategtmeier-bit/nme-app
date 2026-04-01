@@ -2,3 +2,5 @@ streamlit
 pandas
 requests
 openpyxl
+thefuzz
+python-Levenshtein
