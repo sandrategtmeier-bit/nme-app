@@ -17,16 +17,27 @@ URL_SCHOLEN = "https://nmegids.nl/algemeen/interface/xml/excelanalyse-scholen.ph
 st.title("🏫 NME Scholen & Limiet Controleur")
 
 # --- STAP 1: DATA OPHALEN UIT XML ---
+
 @st.cache_data(ttl=300)
 def fetch_nme_data():
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+    }
     try:
-        # Scholen ophalen
-        df_s = pd.read_xml(URL_SCHOLEN, namespaces=NAMESPACES)
-        # Roosters (reserveringen) ophalen
-        df_r = pd.read_xml(URL_ROOSTERS, namespaces=NAMESPACES)
+        # We gebruiken requests om de XML op te halen met de juiste headers
+        response_s = requests.get(URL_SCHOLEN, headers=headers)
+        response_r = requests.get(URL_ROOSTERS, headers=headers)
+        
+        response_s.raise_for_status()
+        response_r.raise_for_status()
+
+        # Daarna zetten we de tekst van de respons om naar een DataFrame
+        df_s = pd.read_xml(response_s.content, namespaces=NAMESPACES)
+        df_r = pd.read_xml(response_r.content, namespaces=NAMESPACES)
+        
         return df_s, df_r
     except Exception as e:
-        st.error(f"Fout bij ophalen XML data: {e}")
+        st.error(f"Toegang geweigerd of fout bij laden: {e}")
         return pd.DataFrame(), pd.DataFrame()
 
 with st.spinner("Data ophalen uit NME-gids..."):
