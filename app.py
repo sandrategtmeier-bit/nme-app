@@ -1,102 +1,112 @@
 import streamlit as st
 import pandas as pd
-import requests
 from thefuzz import process, fuzz
 
 # Pagina configuratie
 st.set_page_config(page_title="NME Monitor 2026", layout="wide")
 
 # --- CONFIGURATIE & URLS ---
-URL_SCHOLEN = "https://jouw-api-url.com/scholen" # Vervang door de echte URL
-URL_RESERVERINGEN = "https://jouw-api-url.com/reserveringen" # Vervang door de echte URL
+NAMESPACES = {
+    'ns1': 'https://www.nmegids.nl/algemeen/interface/xml',
+    'xsi': 'https://www.w3.org/2001/XMLSchema-instance'
+}
+
+URL_ROOSTERS = "https://nmegids.nl/algemeen/interface/xml/excelanalyse-roosters.php?aanbieder=we&token=143fe43ad3750bdewe&schooljaar=2025-2026"
+URL_SCHOLEN = "https://nmegids.nl/algemeen/interface/xml/excelanalyse-scholen.php?aanbieder=we&token=143fe43ad3750bdewe"
 
 st.title("🏫 NME Scholen & Limiet Controleur")
 
-# --- STAP 1: DATA OPHALEN ---
-@st.cache_data(ttl=3600)  # Cache de data voor 1 uur om snelheid te behouden
-def fetch_data(url):
+# --- STAP 1: DATA OPHALEN UIT XML ---
+@st.cache_data(ttl=300)
+def fetch_nme_data():
     try:
-        response = requests.get(url)
-        response.raise_for_status()
-        return pd.DataFrame(response.json())
+        # Scholen ophalen
+        df_s = pd.read_xml(URL_SCHOLEN, namespaces=NAMESPACES)
+        # Roosters (reserveringen) ophalen
+        df_r = pd.read_xml(URL_ROOSTERS, namespaces=NAMESPACES)
+        return df_s, df_r
     except Exception as e:
-        st.error(f"Fout bij ophalen van {url}: {e}")
-        return pd.DataFrame()
+        st.error(f"Fout bij ophalen XML data: {e}")
+        return pd.DataFrame(), pd.DataFrame()
 
-with st.spinner("Data ophalen van servers..."):
-    df_scholen = fetch_data(URL_SCHOLEN)
-    df_reserveringen = fetch_data(URL_RESERVERINGEN)
+with st.spinner("Data ophalen uit NME-gids..."):
+    df_scholen, df_roosters = fetch_nme_data()
 
-# --- STAP 2: DATA SAMENVOEGEN ---
-if not df_scholen.empty and not df_reserveringen.empty:
-    # We gaan ervan uit dat beide DF's een kolom 'school_id' of 'Schoolnaam' hebben
-    # Hier voegen we de reserveringen (aantallen) toe aan de scholenlijst
-    df_main = pd.merge(df_scholen, df_reserveringen, on="Schoolnaam", how="left")
-    df_main['Aantal Groepen'] = df_main['Aantal Groepen'].fillna(0)
+# --- STAP 2: DATA VOORBEREIDEN ---
+if not df_scholen.empty and not df_roosters.empty:
+    # We tellen het aantal unieke groepen/reserveringen per school uit de rooster-feed
+    # Let op: controleer of de kolomnamen 'NAAM' en 'SCHOOL' exact zo in de XML staan
+    reserveringen_count = df_roosters.groupby('SCHOOL').size().reset_index(name='Aantal Groepen')
+    
+    # Merge met de scholenlijst
+    df_main = pd.merge(df_scholen[['NAAM']], reserveringen_count, left_on='NAAM', right_on='SCHOOL', how='left')
+    df_main['Aantal Groepen'] = df_main['Aantal Groepen'].fillna(0).astype(int)
+    df_main = df_main.rename(columns={'NAAM': 'Schoolnaam'}).drop(columns=['SCHOOL'])
 else:
-    st.warning("Kon geen data combineren. Gebruik tijdelijke dummy data voor demo.")
-    # Fallback naar dummy data als de URL's nog niet werken
-    df_main = pd.DataFrame({
-        'Schoolnaam': ['BS De Vlieger', 'Sint Jozefschool', 'OBS De Regenboog', 'De Klimop'],
-        'Aantal Groepen': [22, 15, 28, 12]
-    })
+    st.error("Kon geen data laden van NME-gids. Controleer de API tokens.")
+    st.stop()
 
-# --- STAP 3: ABONNEES LADEN (EXCEL) ---
+# --- STAP 3: ABONNEES LADEN (UPLOAD) ---
 st.sidebar.header("Abonnee Check")
 uploaded_file = st.sidebar.file_uploader("Upload Excel met abonnees (Kolom: 'NAAM')", type=['xlsx'])
 
 abo_scholen = []
 if uploaded_file:
     try:
+        # Gebruik openpyxl voor Excel
         df_excel = pd.read_excel(uploaded_file, engine='openpyxl')
         if 'NAAM' in df_excel.columns:
             abo_scholen = df_excel['NAAM'].dropna().astype(str).tolist()
-            st.sidebar.success(f"✅ {len(abo_scholen)} abonnees herkend.")
+            st.sidebar.success(f"✅ {len(abo_scholen)} abonnees geladen.")
         else:
-            st.sidebar.error("Kolom 'NAAM' niet gevonden!")
+            st.sidebar.error("Kolom 'NAAM' niet gevonden in Excel!")
     except Exception as e:
-        st.sidebar.error(f"Excel fout: {e}")
+        st.sidebar.error(f"Fout bij lezen Excel: {e}")
 
-# --- STAP 4: LIMIETEN BEPALEN (FUZZY) ---
+# --- STAP 4: LIMIETEN BEPALEN (FUZZY LOGIC) ---
 def bepaal_limiet(schoolnaam):
     if not abo_scholen:
-        return 20 # Standaard limiet
+        return 20
     
-    # Zoek beste match
+    # Fuzzy match tussen de schoolnaam uit de XML en de lijst uit de Excel
     match, score = process.extractOne(schoolnaam, abo_scholen, scorer=fuzz.token_sort_ratio)
     
-    if score >= 85:
+    if score >= 85: # Pas dit getal aan voor strenger/minder streng matchen
         return float('inf')
     return 20
 
 df_main['Limiet'] = df_main['Schoolnaam'].apply(bepaal_limiet)
 
-# --- STAP 5: STYLING & WEERGAVE ---
+# --- STAP 5: STYLING ---
 def color_rule(row):
     styles = [''] * len(row)
-    # Rood: meer groepen dan limiet
+    # Rood: Over het limiet
     if row['Aantal Groepen'] > row['Limiet']:
         styles = ['background-color: #ffcccc'] * len(row)
-    # Oranje: meer dan 20 groepen, maar wel abonnee (limiet is inf)
+    # Oranje: Meer dan 20 groepen, maar binnen limiet (dus een abonnee)
     elif row['Aantal Groepen'] > 20 and row['Limiet'] == float('inf'):
         styles = ['background-color: #ffe5cc'] * len(row)
     return styles
 
-# Maak een kopie voor de weergave (inf -> ∞)
+# Weergave dataframe opschonen
 display_df = df_main.copy()
-display_df['Limiet Status'] = display_df['Limiet'].apply(lambda x: "∞ (Abonnee)" if x == float('inf') else "20 (Standaard)")
+display_df['Limiet Weergave'] = display_df['Limiet'].apply(
+    lambda x: "∞ (Abonnee)" if x == float('inf') else "20"
+)
 
-# Toon de tabel
-st.subheader("Overzicht Scholen en Reserveringen")
+# --- STAP 6: OUTPUT ---
+st.subheader("Overzicht Scholen en Groepen (2025-2026)")
+st.info("Scholen die rood kleuren hebben meer dan 20 groepen gereserveerd en staan niet op de abonnee-lijst.")
+
 styled_df = display_df.style.apply(color_rule, axis=1)
 
 st.dataframe(
     styled_df,
-    column_order=("Schoolnaam", "Aantal Groepen", "Limiet Status"),
+    column_order=("Schoolnaam", "Aantal Groepen", "Limiet Weergave"),
     width="stretch",
     hide_index=True
 )
 
-# Download sectie
+# Download
 csv = df_main.to_csv(index=False).encode('utf-8')
-st.download_button("Download Data (CSV)", csv, "nme_export.csv", "text/csv")
+st.download_button("Download Export (CSV)", csv, "nme_analyse.csv", "text/csv")
